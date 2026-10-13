@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/DistributedCrm.Application/DistributedCrm.Application.csproj" />
+    <Project Path="src/DistributedCrm.Domain/DistributedCrm.Domain.csproj" />
+    <Project Path="src/DistributedCrm.Infrastructure/DistributedCrm.Infrastructure.csproj" />
+    <Project Path="src/DistributedCrm.Worker/DistributedCrm.Worker.csproj" />
+  </Folder>
+</Solution>
