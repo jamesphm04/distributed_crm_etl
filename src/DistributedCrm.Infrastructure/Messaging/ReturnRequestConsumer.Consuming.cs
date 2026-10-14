@@ -2,6 +2,7 @@ using System.Text.Json;
 using DistributedCrm.Application.UseCases.ReturnRequests;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 
@@ -34,14 +35,31 @@ public partial class ReturnRequestConsumer
 
     private async Task HandleMessageAsync(IChannel channel, BasicDeliverEventArgs ea, CancellationToken ct)
     {
-        var payload = JsonSerializer.Deserialize<ReturnRequestCreatedMessage>(ea.Body.Span, JsonOptions);
+        ReturnRequestCreatedMessage? payload;
+        try
+        {
+            payload = JsonSerializer.Deserialize<ReturnRequestCreatedMessage>(ea.Body.Span, JsonOptions);
+        }
+        catch (JsonException)
+        {
+            payload = null;
+        }
+
+        if (payload is null)
+        {
+            _logger.LogWarning("Malformed return-request message, sending straight to the DLQ without retry.");
+            // malformed message - no retry count would ever fix this, and with prefetch=1 leaving it
+            // unacked would stall every message behind it. Straight to the DLQ for a human to look at.
+            await PublishToDlqAsync(channel, ea, ct);
+            return;
+        }
 
         using var scope = _scopeFactory.CreateScope();
         var handler = scope.ServiceProvider.GetRequiredService<ProcessReturnRequestHandler>();
 
         try
         {
-            await handler.HandleAsync(payload!.ReturnRequestId, ct);
+            await handler.HandleAsync(payload.ReturnRequestId, ct);
             await channel.BasicAckAsync(ea.DeliveryTag, multiple: false, cancellationToken: ct);
         }
         catch (DbUpdateConcurrencyException)
@@ -49,18 +67,22 @@ public partial class ReturnRequestConsumer
             //the entity changed underneath us (e.g. user cancelled) - not worth retrying
             await channel.BasicAckAsync(ea.DeliveryTag, multiple: false, cancellationToken: ct);
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            await HandleFailureAsync(channel, ea, ct);
+            await HandleFailureAsync(channel, ea, payload.ReturnRequestId, ex, ct);
         }
     }
 
-    private async Task HandleFailureAsync(IChannel channel, BasicDeliverEventArgs ea, CancellationToken ct)
+    private async Task HandleFailureAsync(
+        IChannel channel, BasicDeliverEventArgs ea, Guid returnRequestId, Exception ex, CancellationToken ct)
     {
         var retryCount = GetRetryCount(ea.BasicProperties);
 
         if (retryCount < MaxRetries)
         {
+            _logger.LogWarning(ex,
+                "Processing return request {ReturnRequestId} failed (attempt {Attempt}/{MaxRetries}); nacking to retry.",
+                returnRequestId, retryCount + 1, MaxRetries);
             await channel.BasicNackAsync(
                 ea.DeliveryTag,
                 multiple: false,
@@ -69,6 +91,14 @@ public partial class ReturnRequestConsumer
             return;
         }
 
+        _logger.LogError(ex,
+            "Processing return request {ReturnRequestId} failed after {MaxRetries} attempts; sending to the DLQ.",
+            returnRequestId, MaxRetries);
+        await PublishToDlqAsync(channel, ea, ct);
+    }
+
+    private async Task PublishToDlqAsync(IChannel channel, BasicDeliverEventArgs ea, CancellationToken ct)
+    {
         var properties = new BasicProperties
         {
             Persistent = true,

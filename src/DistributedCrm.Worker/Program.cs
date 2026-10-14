@@ -1,11 +1,13 @@
 using DistributedCrm.Application.Abstractions;
 using DistributedCrm.Application.UseCases.ReturnRequests;
+using DistributedCrm.Infrastructure.Caching;
 using DistributedCrm.Infrastructure.ExternalApis;
 using DistributedCrm.Infrastructure.Messaging;
 using DistributedCrm.Infrastructure.Persistence;
 using DistributedCrm.Worker;
 using Microsoft.EntityFrameworkCore;
 using RabbitMQ.Client;
+using StackExchange.Redis;
 
 var builder = Host.CreateApplicationBuilder(args);
 
@@ -17,7 +19,15 @@ builder.Services.AddDbContext<WorkerDbContext>(options =>
 builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
 builder.Services.AddScoped<IReturnRequestRepository, ReturnRequestRepository>();
 builder.Services.AddScoped<IApprovalApiClient, SimulatedApprovalApiClient>();
+builder.Services.AddScoped<IReturnRequestCacheInvalidator, RedisReturnRequestCacheInvalidator>();
 builder.Services.AddScoped<ProcessReturnRequestHandler>();
+
+builder.Services.AddSingleton<IConnectionMultiplexer>(_ =>
+{
+    var options = ConfigurationOptions.Parse(builder.Configuration.GetConnectionString("Redis")!);
+    options.AbortOnConnectFail = false; // don't throw at startup if Redis isn't ready yet - keep retrying in the background
+    return ConnectionMultiplexer.Connect(options);
+});
 
 builder.Services.Configure<SimulatedApprovalApiOptions>(
     builder.Configuration.GetSection(SimulatedApprovalApiOptions.SectionName));

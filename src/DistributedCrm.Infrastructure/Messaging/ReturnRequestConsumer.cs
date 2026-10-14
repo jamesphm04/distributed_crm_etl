@@ -1,4 +1,5 @@
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using RabbitMQ.Client;
 
 namespace DistributedCrm.Infrastructure.Messaging;
@@ -19,11 +20,16 @@ public partial class ReturnRequestConsumer
 
     private readonly IConnection _connection;
     private readonly IServiceScopeFactory _scopeFactory;
+    private readonly ILogger<ReturnRequestConsumer> _logger;
 
-    public ReturnRequestConsumer(IConnection connection, IServiceScopeFactory scopeFactory)
+    public ReturnRequestConsumer(
+        IConnection connection,
+        IServiceScopeFactory scopeFactory,
+        ILogger<ReturnRequestConsumer> logger)
     {
         _connection = connection;
         _scopeFactory = scopeFactory;
+        _logger = logger;
     }
 
     public static async Task DeclareTopologyAsync(IConnection connection, CancellationToken ct = default)
