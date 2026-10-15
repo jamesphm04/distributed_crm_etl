@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using Azure.Messaging.ServiceBus;
 using DistributedCrm.Application.UseCases.ReturnRequests;
@@ -74,6 +75,7 @@ public sealed class ReturnRequestConsumer : IAsyncDisposable
         {
             // No retry count would ever fix this - park it for a human to look at.
             _logger.LogWarning("Malformed return-request message {MessageId}; dead-lettering without retry.", message.MessageId);
+            Activity.Current?.SetStatus(ActivityStatusCode.Error, "MalformedPayload");
             await args.DeadLetterMessageAsync(
                 message,
                 deadLetterReason: "MalformedPayload",
@@ -114,6 +116,11 @@ public sealed class ReturnRequestConsumer : IAsyncDisposable
         var retryCount = message.ApplicationProperties.TryGetValue(RetryCountProperty, out var raw) && raw is int count
             ? count
             : 0;
+
+        // The processor's span for this delivery. The exception is handled (retry or dead-letter), so the SDK
+        // would record the attempt as a success; mark it failed so a trace shows which attempts failed.
+        Activity.Current?.SetStatus(ActivityStatusCode.Error, ex.Message);
+        Activity.Current?.SetTag("messaging.attempt", retryCount + 1);
 
         if (retryCount < MaxRetries)
         {

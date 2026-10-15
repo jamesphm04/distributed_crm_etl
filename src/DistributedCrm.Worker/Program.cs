@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Azure.Messaging.ServiceBus;
 using DistributedCrm.Application.Abstractions;
 using DistributedCrm.Application.UseCases.ReturnRequests;
@@ -8,6 +9,7 @@ using DistributedCrm.Infrastructure.Messaging;
 using DistributedCrm.Infrastructure.Persistence;
 using DistributedCrm.Worker;
 using DistributedCrm.Worker.Configuration;
+using DistributedCrm.Worker.Telemetry;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Azure;
@@ -23,9 +25,18 @@ var postgresConnectionString = builder.Configuration.GetRequiredConnectionString
 var redisConnectionString = builder.Configuration.GetRequiredConnectionString("Redis");
 var serviceBusConnectionString = builder.Configuration.GetRequiredConnectionString("ServiceBus");
 
+builder.AddTelemetry();
+
 builder.Services.AddDbContext<WorkerDbContext>(options =>
-    options.UseNpgsql(postgresConnectionString,
-            npgsqlOptions => npgsqlOptions.EnableRetryOnFailure(maxRetryCount: 5))
+    options.UseNpgsql(postgresConnectionString, npgsqlOptions => npgsqlOptions
+            .EnableRetryOnFailure(maxRetryCount: 5)
+            // Trace SQL only inside an existing span (a message being processed); anything else would be a one-span
+            // trace. Batches are filtered too because EF Core's SaveChanges sends one. Unlike in be, physical opens
+            // stay traced: nothing here polls, so a reopen only happens inside a message's span, where it explains
+            // a slow first query.
+            .ConfigureDataSource(dataSource => dataSource.ConfigureTracing(tracing => tracing
+                .ConfigureCommandFilter(_ => Activity.Current is not null)
+                .ConfigureBatchFilter(_ => Activity.Current is not null))))
         .UseSnakeCaseNamingConvention());
 
 builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
