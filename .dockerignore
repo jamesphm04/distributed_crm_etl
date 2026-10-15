@@ -1,0 +1,16 @@
+# Host build output. The image builds its own, and host obj/ files (with macOS paths in
+# project.assets.json) can break the restore inside the container.
+**/bin/
+**/obj/
+
+# Not needed to build, and must never end up in an image.
+.git/
+.idea/
+.vscode/
+*.user
+**/.DS_Store
+**/.env
+
+# Changing these shouldn't invalidate the build cache.
+Dockerfile
+.dockerignore
