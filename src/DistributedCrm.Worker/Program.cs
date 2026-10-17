@@ -1,7 +1,10 @@
 using System.Diagnostics;
+using Azure.Core;
+using Azure.Identity;
 using Azure.Messaging.ServiceBus;
 using DistributedCrm.Application.Abstractions;
 using DistributedCrm.Application.UseCases.ReturnRequests;
+using DistributedCrm.Infrastructure.Authentication;
 using DistributedCrm.Infrastructure.Caching;
 using DistributedCrm.Infrastructure.ExternalApis;
 using DistributedCrm.Infrastructure.HealthChecks;
@@ -25,6 +28,12 @@ var postgresConnectionString = builder.Configuration.GetRequiredConnectionString
 var redisConnectionString = builder.Configuration.GetRequiredConnectionString("Redis");
 var serviceBusConnectionString = builder.Configuration.GetRequiredConnectionString("ServiceBus");
 
+// Used only for a dependency whose configuration has no password or key, which means Azure. There it finds the app's
+// managed identity (AZURE_TOKEN_CREDENTIALS narrows the chain to it); on a laptop it would find `az login`.
+var credential = new DefaultAzureCredential();
+builder.Services.AddSingleton<TokenCredential>(credential);
+var redisOptions = await EntraAuthentication.CreateRedisOptionsAsync(redisConnectionString, credential);
+
 builder.AddTelemetry();
 
 builder.Services.AddDbContext<WorkerDbContext>(options =>
@@ -34,9 +43,11 @@ builder.Services.AddDbContext<WorkerDbContext>(options =>
             // trace. Batches are filtered too because EF Core's SaveChanges sends one. Unlike in be, physical opens
             // stay traced: nothing here polls, so a reopen only happens inside a message's span, where it explains
             // a slow first query.
-            .ConfigureDataSource(dataSource => dataSource.ConfigureTracing(tracing => tracing
-                .ConfigureCommandFilter(_ => Activity.Current is not null)
-                .ConfigureBatchFilter(_ => Activity.Current is not null))))
+            .ConfigureDataSource(dataSource => dataSource
+                .UseEntraTokenWhenPasswordless(credential)
+                .ConfigureTracing(tracing => tracing
+                    .ConfigureCommandFilter(_ => Activity.Current is not null)
+                    .ConfigureBatchFilter(_ => Activity.Current is not null))))
         .UseSnakeCaseNamingConvention());
 
 builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
@@ -47,20 +58,29 @@ builder.Services.AddScoped<ProcessReturnRequestHandler>();
 
 builder.Services.AddSingleton<IConnectionMultiplexer>(_ =>
 {
-    var options = ConfigurationOptions.Parse(redisConnectionString);
-    options.AbortOnConnectFail = false; // don't throw at startup if Redis isn't ready yet - keep retrying in the background
+    redisOptions.AbortOnConnectFail = false; // don't throw at startup if Redis isn't ready yet - keep retrying in the background
     // Without a connection, throw at once instead of queueing the command until the 5 s timeout.
-    options.BacklogPolicy = BacklogPolicy.FailFast;
-    return ConnectionMultiplexer.Connect(options);
+    redisOptions.BacklogPolicy = BacklogPolicy.FailFast;
+    return ConnectionMultiplexer.Connect(redisOptions);
 });
 
 builder.Services.Configure<SimulatedApprovalApiOptions>(
     builder.Configuration.GetSection(SimulatedApprovalApiOptions.SectionName));
 
 // The client connects lazily and retries on its own, so there's no startup retry loop to hand-roll.
-// Phase 10 swaps the connection string for AddServiceBusClientWithNamespace + managed identity.
 builder.Services.AddAzureClients(clients =>
-    clients.AddServiceBusClient(serviceBusConnectionString));
+{
+    if (EntraAuthentication.IsServiceBusConnectionString(serviceBusConnectionString))
+    {
+        clients.AddServiceBusClient(serviceBusConnectionString);
+    }
+    else
+    {
+        clients.AddServiceBusClientWithNamespace(serviceBusConnectionString);
+    }
+
+    clients.UseCredential(credential);
+});
 
 builder.Services.AddSingleton<ReturnRequestConsumer>();
 builder.Services.AddHostedService<Worker>();
